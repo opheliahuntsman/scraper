@@ -10,6 +10,7 @@ This application scrapes image data from smartframe.com search results and extra
 
 - 🔍 Web scraping of SmartFrame image galleries
 - ⚡ **Multi-threaded parallel processing** - Up to 10x faster with concurrent browser tabs
+- 🔄 **Advanced retry mechanism** - Multiple retry rounds with exponential backoff and smart error filtering
 - 📜 Automatic infinite scroll handling
 - 📸 EXIF metadata extraction (photographer, date, location, etc.)
 - 🤖 Automatic caption generation for images
@@ -17,6 +18,7 @@ This application scrapes image data from smartframe.com search results and extra
 - 🛡️ Rate limiting to prevent abuse
 - 📈 Job-based scraping with real-time progress tracking
 - 💾 PostgreSQL database for persistent storage across deployments
+- 📝 Comprehensive failure logging and recovery
 
 ## Tech Stack
 
@@ -97,6 +99,12 @@ Get all scraping jobs
 
 ### GET `/api/export/:jobId?format=json|csv`
 Export job results as JSON or CSV
+
+## Advanced Configuration
+
+### IP Rotation / Proxy Support
+
+The scraper includes a robust retry mechanism with exponential backoff that handles most rate limiting scenarios. For advanced users who need IP rotation, see [IP_ROTATION.md](IP_ROTATION.md) for configuration options.
 
 ## License
 
