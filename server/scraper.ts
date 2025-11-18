@@ -250,6 +250,9 @@ class SmartFrameScraper {
 
       // Retry failed images with controlled concurrency and multiple retry rounds
       // Multiple rounds with increasing delays help overcome temporary rate limiting
+      const initialFailures = failedScrapesLogger.getFailures();
+      const initialFailureCount = initialFailures.length;
+      
       const maxRetryRounds = 2; // Maximum number of retry rounds
       for (let round = 1; round <= maxRetryRounds; round++) {
         const failures = failedScrapesLogger.getFailures();
@@ -311,8 +314,8 @@ class SmartFrameScraper {
       console.log(`Total images attempted: ${limitedLinks.length}`);
       console.log(`Failed images (after retries): ${failedCount}`);
       console.log(`Success rate: ${((cleanImages.length / limitedLinks.length) * 100).toFixed(1)}%`);
-      if (failures.length > 0) {
-        const recoveredCount = failures.length - failedCount;
+      if (initialFailureCount > 0) {
+        const recoveredCount = initialFailureCount - failedCount;
         console.log(`Images recovered via retry: ${recoveredCount}`);
       }
       console.log(`Job ID: ${jobId}`);
