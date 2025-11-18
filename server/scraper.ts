@@ -248,20 +248,36 @@ class SmartFrameScraper {
       
       images.push(...processedImages);
 
-      // Retry failed images with controlled concurrency
-      const failures = failedScrapesLogger.getFailures();
-      if (failures.length > 0 && config.extractDetails) {
-        console.log(`\n🔄 Retrying ${failures.length} failed images...`);
+      // Retry failed images with controlled concurrency and multiple retry rounds
+      // Multiple rounds with increasing delays help overcome temporary rate limiting
+      const initialFailures = failedScrapesLogger.getFailures();
+      const initialFailureCount = initialFailures.length;
+      
+      const maxRetryRounds = 2; // Maximum number of retry rounds
+      for (let round = 1; round <= maxRetryRounds; round++) {
+        const failures = failedScrapesLogger.getFailures();
+        if (failures.length === 0 || !config.extractDetails) break;
+        
+        console.log(`\n🔄 Retry Round ${round}/${maxRetryRounds}: Attempting ${failures.length} failed images...`);
+        
+        // Longer delay before each retry round to avoid rate limiting
+        if (round > 1) {
+          const delayBeforeRetry = 5000 * round; // 10s, 15s, etc.
+          console.log(`⏳ Waiting ${delayBeforeRetry / 1000}s before retry round ${round}...`);
+          await new Promise(resolve => setTimeout(resolve, delayBeforeRetry));
+        }
+        
         const retriedImages = await this.retryFailedImages(
           failures,
           thumbnails,
-          2, // Lower concurrency for retries to avoid rate limiting
-          jobId
+          1, // Very low concurrency (1) for retries to avoid rate limiting
+          jobId,
+          round
         );
         
         if (retriedImages.length > 0) {
           images.push(...retriedImages);
-          console.log(`✅ Successfully recovered ${retriedImages.length} images through retries\n`);
+          console.log(`✅ Round ${round}: Successfully recovered ${retriedImages.length} images\n`);
         }
       }
 
@@ -298,8 +314,8 @@ class SmartFrameScraper {
       console.log(`Total images attempted: ${limitedLinks.length}`);
       console.log(`Failed images (after retries): ${failedCount}`);
       console.log(`Success rate: ${((cleanImages.length / limitedLinks.length) * 100).toFixed(1)}%`);
-      if (failures.length > 0) {
-        const recoveredCount = failures.length - failedCount;
+      if (initialFailureCount > 0) {
+        const recoveredCount = initialFailureCount - failedCount;
         console.log(`Images recovered via retry: ${recoveredCount}`);
       }
       console.log(`Job ID: ${jobId}`);
@@ -1052,13 +1068,43 @@ class SmartFrameScraper {
     failures: FailedScrape[],
     thumbnails: Map<string, string>,
     concurrency: number,
-    jobId: string
+    jobId: string,
+    retryRound: number = 1
   ): Promise<ScrapedImage[]> {
     const results: ScrapedImage[] = [];
     let successCount = 0;
     let failCount = 0;
     
-    console.log(`Starting retry mechanism with concurrency: ${concurrency}`);
+    console.log(`Starting retry round ${retryRound} with concurrency: ${concurrency}`);
+    
+    // Filter out non-retryable errors (404s, permanent client errors)
+    const retryableFailures = failures.filter(failure => {
+      // Don't retry 404s - image doesn't exist
+      if (failure.httpStatus === 404) {
+        console.log(`⏭️  Skipping ${failure.imageId} - HTTP 404 (not retryable)`);
+        return false;
+      }
+      // Don't retry 403 Forbidden - access denied
+      if (failure.httpStatus === 403) {
+        console.log(`⏭️  Skipping ${failure.imageId} - HTTP 403 Forbidden (not retryable)`);
+        return false;
+      }
+      // Don't retry 401 Unauthorized
+      if (failure.httpStatus === 401) {
+        console.log(`⏭️  Skipping ${failure.imageId} - HTTP 401 Unauthorized (not retryable)`);
+        return false;
+      }
+      return true;
+    });
+    
+    if (retryableFailures.length < failures.length) {
+      console.log(`📊 Filtered out ${failures.length - retryableFailures.length} non-retryable errors`);
+    }
+    
+    if (retryableFailures.length === 0) {
+      console.log('No retryable failures found');
+      return results;
+    }
     
     // Create a pool of worker pages for retries
     const workerPages: Page[] = [];
@@ -1087,15 +1133,15 @@ class SmartFrameScraper {
     try {
       // Process in batches
       const batchSize = concurrency;
-      for (let i = 0; i < failures.length; i += batchSize) {
-        const batch = failures.slice(i, i + batchSize);
+      for (let i = 0; i < retryableFailures.length; i += batchSize) {
+        const batch = retryableFailures.slice(i, i + batchSize);
         
         // Process batch in parallel
         const batchPromises = batch.map(async (failure, index) => {
           const workerPage = workerPages[index % concurrency];
           const retryAttempt = (failure.retryAttempt || 0) + 1;
           
-          console.log(`🔄 [Retry ${retryAttempt}] Attempting ${failure.imageId} (${i + index + 1}/${failures.length})`);
+          console.log(`🔄 [Round ${retryRound}, Retry ${retryAttempt}] Attempting ${failure.imageId} (${i + index + 1}/${retryableFailures.length})`);
           
           try {
             // Extract hash from URL (format: /search/image/{hash}/{imageId})
@@ -1114,18 +1160,18 @@ class SmartFrameScraper {
             // Check if we got meaningful data (not just partial/empty image)
             // Consider it successful if we have at least title or photographer
             if (image && (image.title || image.photographer || image.caption)) {
-              console.log(`✅ [Retry ${retryAttempt}] Success: ${failure.imageId}`);
+              console.log(`✅ [Round ${retryRound}, Retry ${retryAttempt}] Success: ${failure.imageId}`);
               // Remove from failed list since retry was successful
               failedScrapesLogger.removeSuccess(failure.imageId);
               successCount++;
               return image;
             } else {
-              console.log(`❌ [Retry ${retryAttempt}] Still no data: ${failure.imageId}`);
+              console.log(`❌ [Round ${retryRound}, Retry ${retryAttempt}] Still no data: ${failure.imageId}`);
               // Update failure with incremented retry attempt
               failedScrapesLogger.addFailure({
                 imageId: failure.imageId,
                 url: failure.url,
-                reason: `${failure.reason} (retry ${retryAttempt} failed)`,
+                reason: `${failure.reason} (retry round ${retryRound}, attempt ${retryAttempt} failed)`,
                 attempts: failure.attempts + 1,
                 timestamp: new Date().toISOString(),
                 httpStatus: failure.httpStatus,
@@ -1134,12 +1180,12 @@ class SmartFrameScraper {
               failCount++;
             }
           } catch (error) {
-            console.error(`❌ [Retry ${retryAttempt}] Exception for ${failure.imageId}:`, error instanceof Error ? error.message : error);
+            console.error(`❌ [Round ${retryRound}, Retry ${retryAttempt}] Exception for ${failure.imageId}:`, error instanceof Error ? error.message : error);
             // Update failure with exception info
             failedScrapesLogger.addFailure({
               imageId: failure.imageId,
               url: failure.url,
-              reason: `Retry ${retryAttempt} exception: ${error instanceof Error ? error.message : String(error)}`,
+              reason: `Retry round ${retryRound}, attempt ${retryAttempt} exception: ${error instanceof Error ? error.message : String(error)}`,
               attempts: failure.attempts + 1,
               timestamp: new Date().toISOString(),
               httpStatus: failure.httpStatus,
@@ -1155,9 +1201,12 @@ class SmartFrameScraper {
         const validImages = batchResults.filter((img): img is ScrapedImage => img !== null);
         results.push(...validImages);
         
-        // Delay between batches to avoid rate limiting
-        if (i + batchSize < failures.length) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+        // Increased delay between batches to avoid rate limiting
+        // Use exponential backoff based on retry round
+        if (i + batchSize < retryableFailures.length) {
+          const delayBetweenBatches = 3000 * retryRound; // 3s, 6s, etc. based on round
+          console.log(`⏳ Waiting ${delayBetweenBatches / 1000}s before next batch...`);
+          await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
         }
       }
     } finally {
@@ -1165,10 +1214,10 @@ class SmartFrameScraper {
       await Promise.all(workerPages.map(page => page.close().catch(() => {})));
     }
 
-    console.log(`\n📊 Retry Summary:`);
+    console.log(`\n📊 Retry Round ${retryRound} Summary:`);
     console.log(`   ✅ Successful: ${successCount}`);
     console.log(`   ❌ Failed: ${failCount}`);
-    console.log(`   📈 Recovery rate: ${((successCount / failures.length) * 100).toFixed(1)}%\n`);
+    console.log(`   📈 Recovery rate: ${retryableFailures.length > 0 ? ((successCount / retryableFailures.length) * 100).toFixed(1) : 0}%\n`);
     
     return results;
   }
@@ -1620,7 +1669,28 @@ class SmartFrameScraper {
             httpStatus = response?.status() || 0;
             
             // Check for HTTP error responses
-            if (httpStatus >= 500) {
+            if (httpStatus === 429) {
+              // Rate limiting - use longer exponential backoff
+              console.log(`⚠️  [${imageId}] HTTP 429 - Rate limited (attempt ${attempt}/${maxAttempts})`);
+              if (attempt < maxAttempts) {
+                // Longer exponential backoff for rate limiting: 5s, 10s, 20s
+                const delay = 5000 * Math.pow(2, attempt - 1);
+                console.log(`Rate limited. Waiting ${delay}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+              } else {
+                console.log(`❌ [${imageId}] Failed after ${attempt} attempts - HTTP 429 Rate Limited. Logging failure.`);
+                failedScrapesLogger.addFailure({
+                  imageId,
+                  url,
+                  reason: `HTTP 429 Rate Limited after ${maxAttempts} attempts`,
+                  attempts: maxAttempts,
+                  timestamp: new Date().toISOString(),
+                  httpStatus
+                });
+                return image; // Return partial data for CSV
+              }
+            } else if (httpStatus >= 500) {
               console.log(`⚠️  [${imageId}] HTTP ${httpStatus} error - Server error (attempt ${attempt}/${maxAttempts})`);
               if (attempt < maxAttempts) {
                 // Exponential backoff: 2s, 4s, 8s
