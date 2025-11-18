@@ -5,6 +5,7 @@ import { normalizeDate } from "./utils/date-normalization";
 import { generateCaption } from "./utils/caption-generator";
 import { transformToCleanMetadata } from "./utils/metadata-normalizer";
 import { failedScrapesLogger, FailedScrape } from "./utils/failed-scrapes-logger";
+import { getProxyManager, ProxyConfig } from "./proxy-manager";
 
 type ScrapeProgress = {
   percentage: number;
@@ -24,20 +25,42 @@ const metadataCache = new Map<string, any>();
 
 class SmartFrameScraper {
   private browser: Browser | null = null;
+  private currentProxy: ProxyConfig | null = null;
 
   async initialize() {
     if (!this.browser) {
+      const proxyManager = getProxyManager();
+      const proxy = proxyManager.getNextProxy();
+      
+      const launchArgs = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--disable-blink-features=AutomationControlled',
+      ];
+
+      // Add proxy if available
+      if (proxy) {
+        const proxyArg = proxyManager.formatProxyServerArg(proxy);
+        launchArgs.push(`--proxy-server=${proxyArg}`);
+        this.currentProxy = proxy;
+        console.log(`[Scraper] Using proxy: ${proxyArg}`);
+      } else {
+        console.log('[Scraper] No proxy configured, using direct connection');
+      }
+
       this.browser = await puppeteer.launch({
         headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu',
-          '--disable-blink-features=AutomationControlled',
-        ],
+        args: launchArgs,
       });
+
+      // If proxy requires authentication, set it up on page creation
+      if (proxy?.username && proxy?.password) {
+        // We'll handle auth per-page in the scrape method
+        console.log('[Scraper] Proxy authentication will be configured per page');
+      }
     }
   }
 
@@ -56,6 +79,15 @@ class SmartFrameScraper {
   ): Promise<ScrapedImage[]> {
     await this.initialize();
     const page = await this.browser!.newPage();
+
+    // Setup proxy authentication if needed
+    if (this.currentProxy?.username && this.currentProxy?.password) {
+      await page.authenticate({
+        username: this.currentProxy.username,
+        password: this.currentProxy.password,
+      });
+      console.log('[Scraper] Proxy authentication configured for main page');
+    }
 
     // Initialize failed scrapes logger for this job
     failedScrapesLogger.startJob(jobId);
@@ -394,6 +426,14 @@ class SmartFrameScraper {
     const workerPages: Page[] = [];
     for (let i = 0; i < concurrency; i++) {
       const workerPage = await this.browser!.newPage();
+      
+      // Setup proxy authentication if needed
+      if (this.currentProxy?.username && this.currentProxy?.password) {
+        await workerPage.authenticate({
+          username: this.currentProxy.username,
+          password: this.currentProxy.password,
+        });
+      }
       
       // Apply anti-detection setup to each worker page
       await workerPage.setViewport({ width: 1920, height: 1080 });
@@ -1111,6 +1151,14 @@ class SmartFrameScraper {
     for (let i = 0; i < concurrency; i++) {
       const workerPage = await this.browser!.newPage();
       
+      // Setup proxy authentication if needed
+      if (this.currentProxy?.username && this.currentProxy?.password) {
+        await workerPage.authenticate({
+          username: this.currentProxy.username,
+          password: this.currentProxy.password,
+        });
+      }
+      
       // Apply anti-detection setup
       await workerPage.setViewport({ width: 1920, height: 1080 });
       await workerPage.setUserAgent(
@@ -1735,10 +1783,24 @@ class SmartFrameScraper {
             }
             
             navSuccess = true;
+            
+            // Record successful proxy usage if proxy is configured
+            if (this.currentProxy) {
+              const proxyManager = getProxyManager();
+              proxyManager.recordSuccess(this.currentProxy);
+            }
+            
             break;
           } catch (error) {
             lastError = error instanceof Error ? error : new Error(String(error));
             console.log(`Navigation attempt ${attempt} failed for ${url}:`, error instanceof Error ? error.message : error);
+            
+            // Record proxy failure if proxy is configured and this is a connection error
+            if (this.currentProxy && attempt === maxAttempts) {
+              const proxyManager = getProxyManager();
+              proxyManager.recordFailure(this.currentProxy);
+            }
+            
             if (attempt === maxAttempts) {
               // Log navigation timeout failure
               console.log(`❌ [${imageId}] Failed to navigate after ${maxAttempts} attempts. Logging failure.`);
