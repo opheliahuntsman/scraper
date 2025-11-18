@@ -212,7 +212,7 @@ export class ProxyManager {
    * Reset all proxy statistics
    */
   resetStats(): void {
-    for (const [key, stats] of this.stats.entries()) {
+    Array.from(this.stats.entries()).forEach(([key, stats]) => {
       stats.totalRequests = 0;
       stats.successfulRequests = 0;
       stats.failedRequests = 0;
@@ -220,7 +220,7 @@ export class ProxyManager {
       stats.lastSuccess = null;
       stats.lastFailure = null;
       stats.isHealthy = true;
-    }
+    });
   }
 
   /**
