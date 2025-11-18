@@ -20,6 +20,15 @@ IP rotation can help with:
 - **Geographic Restrictions**: Access content from different geographic locations
 - **Reliability**: Fallback to alternative IPs if one is blocked
 
+## VPN Service Guides
+
+Looking to use a popular VPN service? We have detailed setup guides:
+
+- **[Windscribe Guide](WINDSCRIBE_GUIDE.md)** - Step-by-step setup for Windscribe VPN
+- **[NordVPN Guide](NORDVPN_GUIDE.md)** - Complete configuration for NordVPN
+
+These guides include credential setup, server locations, and optimization tips.
+
 ## Quick Start
 
 ### Environment Variable Configuration

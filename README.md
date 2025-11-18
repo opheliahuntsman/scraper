@@ -104,7 +104,14 @@ Export job results as JSON or CSV
 
 ### IP Rotation / Proxy Support
 
-The scraper includes a robust retry mechanism with exponential backoff that handles most rate limiting scenarios. For advanced users who need IP rotation, see [IP_ROTATION.md](IP_ROTATION.md) for configuration options.
+The scraper includes built-in proxy rotation with health monitoring for handling rate limiting scenarios. 
+
+**Quick Start**: Set the `PROXY_LIST` environment variable with your proxies and the scraper automatically rotates through them.
+
+**Documentation**:
+- [IP_ROTATION.md](IP_ROTATION.md) - Complete proxy rotation guide
+- [WINDSCRIBE_GUIDE.md](WINDSCRIBE_GUIDE.md) - Windscribe VPN setup
+- [NORDVPN_GUIDE.md](NORDVPN_GUIDE.md) - NordVPN setup
 
 ## License
 
