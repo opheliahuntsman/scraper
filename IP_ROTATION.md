@@ -24,10 +24,11 @@ IP rotation can help with:
 
 Looking to use a popular VPN service? We have detailed setup guides:
 
-- **[Windscribe Guide](WINDSCRIBE_GUIDE.md)** - Step-by-step setup for Windscribe VPN
+- **[VPN Auto-Change Guide](VPN_AUTOCHANGE_GUIDE.md)** - **NEW!** Automatic VPN location changes with connection verification
+- **[Windscribe Guide](WINDSCRIBE_GUIDE.md)** - Step-by-step setup for Windscribe VPN  
 - **[NordVPN Guide](NORDVPN_GUIDE.md)** - Complete configuration for NordVPN
 
-These guides include credential setup, server locations, and optimization tips.
+The **VPN Auto-Change** feature allows the scraper to automatically execute VPN commands and verify connections before continuing - perfect for avoiding rate limits without manual intervention!
 
 ## Quick Start
 
