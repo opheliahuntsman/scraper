@@ -5,6 +5,8 @@ import { normalizeDate } from "./utils/date-normalization";
 import { generateCaption } from "./utils/caption-generator";
 import { transformToCleanMetadata } from "./utils/metadata-normalizer";
 import { failedScrapesLogger, FailedScrape } from "./utils/failed-scrapes-logger";
+import { getProxyManager, ProxyConfig } from "./proxy-manager";
+import { randomDelay, delayWithVariation, getRandomDelay } from "./utils/delay-utils";
 
 type ScrapeProgress = {
   percentage: number;
@@ -24,20 +26,42 @@ const metadataCache = new Map<string, any>();
 
 class SmartFrameScraper {
   private browser: Browser | null = null;
+  private currentProxy: ProxyConfig | null = null;
 
   async initialize() {
     if (!this.browser) {
+      const proxyManager = getProxyManager();
+      const proxy = proxyManager.getNextProxy();
+      
+      const launchArgs = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--disable-blink-features=AutomationControlled',
+      ];
+
+      // Add proxy if available
+      if (proxy) {
+        const proxyArg = proxyManager.formatProxyServerArg(proxy);
+        launchArgs.push(`--proxy-server=${proxyArg}`);
+        this.currentProxy = proxy;
+        console.log(`[Scraper] Using proxy: ${proxyArg}`);
+      } else {
+        console.log('[Scraper] No proxy configured, using direct connection');
+      }
+
       this.browser = await puppeteer.launch({
         headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu',
-          '--disable-blink-features=AutomationControlled',
-        ],
+        args: launchArgs,
       });
+
+      // If proxy requires authentication, set it up on page creation
+      if (proxy?.username && proxy?.password) {
+        // We'll handle auth per-page in the scrape method
+        console.log('[Scraper] Proxy authentication will be configured per page');
+      }
     }
   }
 
@@ -56,6 +80,15 @@ class SmartFrameScraper {
   ): Promise<ScrapedImage[]> {
     await this.initialize();
     const page = await this.browser!.newPage();
+
+    // Setup proxy authentication if needed
+    if (this.currentProxy?.username && this.currentProxy?.password) {
+      await page.authenticate({
+        username: this.currentProxy.username,
+        password: this.currentProxy.password,
+      });
+      console.log('[Scraper] Proxy authentication configured for main page');
+    }
 
     // Initialize failed scrapes logger for this job
     failedScrapesLogger.startJob(jobId);
@@ -231,6 +264,7 @@ class SmartFrameScraper {
         config.extractDetails,
         concurrency,
         jobId,
+        config,
         async (currentImages: ScrapedImage[], attemptedCount: number) => {
           // Progress based on attempted count (reaches 100% when all links processed)
           const progress = Math.round((attemptedCount / limitedLinks.length) * 100);
@@ -253,7 +287,7 @@ class SmartFrameScraper {
       const initialFailures = failedScrapesLogger.getFailures();
       const initialFailureCount = initialFailures.length;
       
-      const maxRetryRounds = 2; // Maximum number of retry rounds
+      const maxRetryRounds = config.maxRetryRounds || 3; // Configurable retry rounds (default 3, increased from 2)
       for (let round = 1; round <= maxRetryRounds; round++) {
         const failures = failedScrapesLogger.getFailures();
         if (failures.length === 0 || !config.extractDetails) break;
@@ -261,10 +295,11 @@ class SmartFrameScraper {
         console.log(`\n🔄 Retry Round ${round}/${maxRetryRounds}: Attempting ${failures.length} failed images...`);
         
         // Longer delay before each retry round to avoid rate limiting
+        // Add random variation to avoid detection patterns
+        const baseDelay = 5000 * round; // 5s, 10s, 15s, etc.
         if (round > 1) {
-          const delayBeforeRetry = 5000 * round; // 10s, 15s, etc.
-          console.log(`⏳ Waiting ${delayBeforeRetry / 1000}s before retry round ${round}...`);
-          await new Promise(resolve => setTimeout(resolve, delayBeforeRetry));
+          console.log(`⏳ Waiting ${baseDelay / 1000}s (+ random variation) before retry round ${round}...`);
+          await delayWithVariation(baseDelay, config.randomDelayMin, config.randomDelayMax);
         }
         
         const retriedImages = await this.retryFailedImages(
@@ -272,12 +307,36 @@ class SmartFrameScraper {
           thumbnails,
           1, // Very low concurrency (1) for retries to avoid rate limiting
           jobId,
-          round
+          round,
+          config
         );
         
         if (retriedImages.length > 0) {
           images.push(...retriedImages);
           console.log(`✅ Round ${round}: Successfully recovered ${retriedImages.length} images\n`);
+        }
+      }
+      
+      // Final comprehensive retry at end of scrape (Request #2)
+      // Give failed images one more chance after all previous attempts
+      const finalFailures = failedScrapesLogger.getFailures();
+      if (finalFailures.length > 0 && config.extractDetails) {
+        console.log(`\n🎯 Final Retry: Attempting ${finalFailures.length} remaining failed images...`);
+        console.log(`⏳ Waiting 10s (+ random variation) before final retry...`);
+        await delayWithVariation(10000, config.randomDelayMin, config.randomDelayMax);
+        
+        const finalRetriedImages = await this.retryFailedImages(
+          finalFailures,
+          thumbnails,
+          1, // Single concurrency for maximum care
+          jobId,
+          maxRetryRounds + 1, // Mark as final round
+          config
+        );
+        
+        if (finalRetriedImages.length > 0) {
+          images.push(...finalRetriedImages);
+          console.log(`✅ Final Retry: Successfully recovered ${finalRetriedImages.length} more images\n`);
         }
       }
 
@@ -385,15 +444,31 @@ class SmartFrameScraper {
     extractDetails: boolean,
     concurrency: number,
     jobId: string,
+    config: ScrapeConfig,
     onProgress: (currentImages: ScrapedImage[], attemptedCount: number) => Promise<void>
   ): Promise<ScrapedImage[]> {
     const results: ScrapedImage[] = [];
     let attemptedCount = 0;
     
-    // Create a pool of worker pages
+    // Create a pool of worker pages with staggered initialization
     const workerPages: Page[] = [];
     for (let i = 0; i < concurrency; i++) {
+      // Stagger tab opening with random delays to avoid detection (Request #4)
+      if (config.staggerTabDelay && i > 0) {
+        const staggerDelay = getRandomDelay(config.randomDelayMin, Math.min(config.randomDelayMax, 1000));
+        console.log(`⏳ Staggering tab ${i + 1} opening (${staggerDelay}ms delay)...`);
+        await randomDelay(staggerDelay, staggerDelay + 500);
+      }
+      
       const workerPage = await this.browser!.newPage();
+      
+      // Setup proxy authentication if needed
+      if (this.currentProxy?.username && this.currentProxy?.password) {
+        await workerPage.authenticate({
+          username: this.currentProxy.username,
+          password: this.currentProxy.password,
+        });
+      }
       
       // Apply anti-detection setup to each worker page
       await workerPage.setViewport({ width: 1920, height: 1080 });
@@ -462,9 +537,9 @@ class SmartFrameScraper {
         // Progress is based on attempted count, not successful count
         await onProgress([...results], attemptedCount);
         
-        // Small delay between batches to avoid overwhelming the server
+        // Delay between batches with random variation to avoid detection patterns (Request #4)
         if (i + batchSize < linkData.length) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await delayWithVariation(500, config.randomDelayMin, config.randomDelayMax);
         }
       }
     } finally {
@@ -1069,7 +1144,8 @@ class SmartFrameScraper {
     thumbnails: Map<string, string>,
     concurrency: number,
     jobId: string,
-    retryRound: number = 1
+    retryRound: number = 1,
+    config: ScrapeConfig
   ): Promise<ScrapedImage[]> {
     const results: ScrapedImage[] = [];
     let successCount = 0;
@@ -1110,6 +1186,14 @@ class SmartFrameScraper {
     const workerPages: Page[] = [];
     for (let i = 0; i < concurrency; i++) {
       const workerPage = await this.browser!.newPage();
+      
+      // Setup proxy authentication if needed
+      if (this.currentProxy?.username && this.currentProxy?.password) {
+        await workerPage.authenticate({
+          username: this.currentProxy.username,
+          password: this.currentProxy.password,
+        });
+      }
       
       // Apply anti-detection setup
       await workerPage.setViewport({ width: 1920, height: 1080 });
@@ -1202,11 +1286,11 @@ class SmartFrameScraper {
         results.push(...validImages);
         
         // Increased delay between batches to avoid rate limiting
-        // Use exponential backoff based on retry round
+        // Use exponential backoff based on retry round with random variation
         if (i + batchSize < retryableFailures.length) {
-          const delayBetweenBatches = 3000 * retryRound; // 3s, 6s, etc. based on round
-          console.log(`⏳ Waiting ${delayBetweenBatches / 1000}s before next batch...`);
-          await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
+          const baseDelay = 3000 * retryRound; // 3s, 6s, 9s, etc. based on round
+          console.log(`⏳ Waiting ${baseDelay / 1000}s (+ random variation) before next batch...`);
+          await delayWithVariation(baseDelay, config.randomDelayMin, config.randomDelayMax);
         }
       }
     } finally {
@@ -1735,10 +1819,24 @@ class SmartFrameScraper {
             }
             
             navSuccess = true;
+            
+            // Record successful proxy usage if proxy is configured
+            if (this.currentProxy) {
+              const proxyManager = getProxyManager();
+              proxyManager.recordSuccess(this.currentProxy);
+            }
+            
             break;
           } catch (error) {
             lastError = error instanceof Error ? error : new Error(String(error));
             console.log(`Navigation attempt ${attempt} failed for ${url}:`, error instanceof Error ? error.message : error);
+            
+            // Record proxy failure if proxy is configured and this is a connection error
+            if (this.currentProxy && attempt === maxAttempts) {
+              const proxyManager = getProxyManager();
+              proxyManager.recordFailure(this.currentProxy);
+            }
+            
             if (attempt === maxAttempts) {
               // Log navigation timeout failure
               console.log(`❌ [${imageId}] Failed to navigate after ${maxAttempts} attempts. Logging failure.`);

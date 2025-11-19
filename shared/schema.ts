@@ -8,6 +8,11 @@ export const scrapeConfigSchema = z.object({
   autoScroll: z.boolean().default(true),
   scrollDelay: z.number().min(500).max(5000).default(1000),
   concurrency: z.number().min(1).max(10).default(5),
+  // Variable wait times for detection avoidance
+  randomDelayMin: z.number().min(0).max(10000).default(0), // Min extra random delay in ms
+  randomDelayMax: z.number().min(0).max(10000).default(2000), // Max extra random delay in ms
+  staggerTabDelay: z.boolean().default(true), // Stagger tab opening with random delays
+  maxRetryRounds: z.number().min(1).max(5).default(3), // Number of retry rounds (increased from 2)
 });
 
 export type ScrapeConfig = z.infer<typeof scrapeConfigSchema>;
